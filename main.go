@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/1pkg/gopium/gopium"
 	"github.com/1pkg/gopium/runners"
@@ -39,7 +40,15 @@ var (
 	// gopium global vars
 	timeout     int
 	packageName string
+	batchSize   int
 )
+
+const ConfigKey = "x-config"
+
+type Config struct {
+	packageName string
+	ppath       string
+}
 
 func getPackageName(file string) (string, error) {
 	fset := token.NewFileSet()
@@ -57,6 +66,43 @@ func getPackageName(file string) (string, error) {
 	return astFile.Name.Name, nil
 }
 
+func run(ctx context.Context, args []string) error {
+	ourConfig := ctx.Value(ConfigKey).(Config)
+	packageName = ourConfig.packageName
+	ppath = ourConfig.ppath
+	fmt.Println("processing >>", packageName, ppath, args)
+	// create cli app instance
+	cli, err := runners.NewCli(
+		// target platform vars
+		tcompiler,
+		tarch,
+		tcpulines,
+		// package parser vars
+		packageName, // package name
+		ppath,
+		pbenvs,
+		pbflags,
+		// gopium walker vars
+		"ast_go", // single walker
+		wregex,
+		wdeep,
+		wbackref,
+		args, // strategies slice
+		// gopium printer vars
+		pindent,
+		ptabwidth,
+		pusespace,
+		pusegofmt,
+		// gopium global vars
+		timeout,
+	)
+	if err != nil {
+		return err
+	}
+	// execute app
+	return cli.Run(ctx)
+}
+
 // init cli command runner
 // and global context
 func init() {
@@ -66,137 +112,7 @@ func init() {
 		Short:   gopium.STAMP,
 		Version: gopium.VERSION,
 		Example: "gopium -r ^A go_std 1pkg/gopium filter_pads memory_pack separate_padding_cpu_l1_top separate_padding_cpu_l1_bottom",
-		Long: `
-Gopium is the tool that was designed to automate and simplify some common performance transformations for structs, such as:
-- cpu cache alignment
-- memory packing
-- false sharing guarding
-- auto annotation
-- generic fields management, etc.
-In order to use gopium cli you need to provide at least package name (full package name is expected),
-list of strategies which is applied one by one and single walker.
-Outcome of execution is fully defined by list of strategies and walker combination.
-List of strategies modifies structs inside the package, walker facilitates and insures,
-that outcome is formatted and written to one of provided destinations.
-Gopium provides next walkers:
- - ast_go (directly syncs result as go code to orinal file)
- - ast_go_tree (directly syncs result as go code to copy package)
- - ast_std (prints result as go code to stdout)
- - ast_gopium (directly syncs result as go code to copy gopium files)
- - file_json (prints json encoded results to single file inside package directory)
- - file_xml (prints xml encoded results to single file inside package directory)
- - file_csv (prints csv encoded results to single file inside package directory)
- - file_md_table (prints markdown table encoded results to single file inside package directory)
- - size_align_file_md_table (prints markdown encoded table of sizes and aligns difference for results to single file
-	inside package directory)
- - fields_file_html_table (prints html encoded table of fields difference for results to single file
-	inside package directory)
-Gopium provides next strategies:
- - process_tag_group (uses gopium fields tags annotation in order to process different set of strategies
-	on different groups and then combine results in single struct result)
- - memory_pack (rearranges structure fields to obtain optimal memory utilization)
- - memory_unpack (rearranges structure field list to obtain inflated memory utilization)
- - cache_rounding_cpu_l1_discrete (fits structure into cpu cache line #1 by adding bottom partial rounding cpu cache padding)
- - cache_rounding_cpu_l2_discrete (fits structure into cpu cache line #2 by adding bottom partial rounding cpu cache padding)
- - cache_rounding_cpu_l3_discrete (fits structure into cpu cache line #3 by adding bottom partial rounding cpu cache padding)
- - cache_rounding_bytes_{{uint}}_discrete (fits structure into provided number of bytes by adding bottom partial rounding
-	bytes cache padding)
- - cache_rounding_cpu_l1_full (fits structure into full cpu cache line #1 by adding bottom rounding cpu cache padding)
- - cache_rounding_cpu_l2_full (fits structure into full cpu cache line #2 by adding bottom rounding cpu cache padding)
- - cache_rounding_cpu_l3_full (fits structure into full cpu cache line #3 by adding bottom rounding cpu cache padding)
- - cache_rounding_bytes_{{uint}}_full (fits structure into full provided number of bytes by adding bottom rounding
-	bytes cache padding)
- - false_sharing_cpu_l1 (guards structure from false sharing by adding extra cpu cache line #1 paddings
-	for each structure field)
- - false_sharing_cpu_l2 (guards structure from false sharing by adding extra cpu cache line #1 paddings
-	for each structure field)
- - false_sharing_cpu_l3 (guards structure from false sharing by adding extra cpu cache line #1 paddings
-	for each structure field)
-- false_sharing_bytes_{{uint}} (guards structure from false sharing by adding extra provided number of bytes paddings
-	for each structure field)
- - separate_padding_system_alignment_top (separates structure with extra system alignment padding by adding
-	the padding at the top)
-- separate_padding_system_alignment_bottom (separates structure with extra system alignment padding by adding
-	the padding at the bottom)
- - separate_padding_cpu_l1_top (separates structure with extra cpu cache line #1 padding by adding
-	the padding at the top)
- - separate_padding_cpu_l2_top (separates structure with extra cpu cache line #2 padding by adding
-	the padding at the top)
- - separate_padding_cpu_l3_top (separates structure with extra cpu cache line #3 padding by adding
-	the padding at the top)
-- separate_padding_bytes_{{uint}_top (separates structure with extra provided number of bytes padding by adding
-	the padding at the top)
- - separate_padding_cpu_l1_bottom (separates structure with extra cpu cache line #1 padding by adding
-	the padding at the bottom)
- - separate_padding_cpu_l2_bottom (separates structure with extra cpu cache line #2 padding by adding
-	the padding at the bottom)
- - separate_padding_cpu_l3_bottom (separates structure with extra cpu cache line #3 padding by adding
-	the padding at the bottom)
-- separate_padding_bytes_{{uint}_bottom (separates structure with extra provided number of bytes padding by adding
-	the padding at the bottom)
- - explicit_paddings_system_alignment (explicitly aligns each structure field to system alignment padding by adding
-	missing paddings for each field)
- - explicit_paddings_type_natural (explicitly aligns each structure field to max type alignment padding by adding
-	missing paddings for each field)
- - add_tag_group_soft (adds gopium fields tags annotation if no previous annotation found)
- - add_tag_group_force (adds gopium fields tags annotation if previous annotation found overwrites it)
- - add_tag_group_discrete (discretely adds gopium fields tags annotation if no previous annotation found)
- - add_tag_group_force_discrete (discretely adds gopium fields tags annotation if previous annotation
-	found overwrites it)
- - remove_tag_group (removes gopium fields tags annotation)
- - fields_annotate_doc (adds align and size doc annotation for each structure field)
- - fields_annotate_comment adds align and size comment annotation for each structure field)
- - struct_annotate_doc (adds aggregated align and size doc annotation for structure)
- - struct_annotate_comment (adds aggregated align and size comment annotation for structure)
- - name_lexicographical_ascending (sorts fields accordingly to their names in ascending order)
- - name_lexicographical_descending (sorts fields accordingly to their names descending order)
- - type_lexicographical_ascending (sorts fields accordingly to their types in ascending order)
- - type_lexicographical_descending (sorts fields accordingly to their types in descending order)
- - filter_pads (filters out all structure padding fields)
- - ignore (does nothing by returning original structure)
-Notes:
- - it might be useful to use filter_pads in pipes with other strategies to clean paddings first.
- - process_tag_group currently supports only next fields tags annotation formats:
-  - gopium:"stg,stg,stg" processed as default group
-  - gopium:"group:def;stg,stg,stg" processed as named group
- - by specifying tag_type you can automatically generate fields tags annotation suitable for process_tag_group.
- - add_tag_* strategies just add list of applied transformations to structure fields tags and NOT change results of
-	other strategies, you can execute process_tag_group strategy afterwards to reuse saved strategies list.
-		`,
-		Args: cobra.MinimumNArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Println("debug >>", packageName, ppath, args)
-			// create cli app instance
-			cli, err := runners.NewCli(
-				// target platform vars
-				tcompiler,
-				tarch,
-				tcpulines,
-				// package parser vars
-				packageName, // package name
-				ppath,
-				pbenvs,
-				pbflags,
-				// gopium walker vars
-				"ast_go", // single walker
-				wregex,
-				wdeep,
-				wbackref,
-				args, // strategies slice
-				// gopium printer vars
-				pindent,
-				ptabwidth,
-				pusespace,
-				pusegofmt,
-				// gopium global vars
-				timeout,
-			)
-			if err != nil {
-				return err
-			}
-			// execute app
-			return cli.Run(cmd.Context())
-		},
+		Args:    cobra.MinimumNArgs(1),
 	}
 	// set target_compiler flag
 	cli.Flags().StringVarP(
@@ -329,6 +245,13 @@ By default it is used and overrides other printer formatting parameters.
 		0,
 		"Gopium global timeout of cli command in seconds, considered only if value greater than 0.",
 	)
+	cli.Flags().IntVarP(
+		&batchSize,
+		"batch_size",
+		"n",
+		1,
+		"Number of file to scan in parallel",
+	)
 }
 
 func main() {
@@ -336,6 +259,12 @@ func main() {
 	// prepare context with signals cancelation
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
+
+	cli.Execute()
+	cli.RunE = func(cmd *cobra.Command, args []string) error {
+		ctx := cmd.Context()
+		return run(ctx, args)
+	}
 
 	firstFile := make(map[string]string)
 	err := filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
@@ -365,16 +294,39 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	var wg sync.WaitGroup
+
+	count := 0
 	for dir, filename := range firstFile {
-		pname, err := getPackageName(filename)
-		if err != nil {
-			fmt.Println(err)
-			continue
-		}
-		packageName = pname
-		ppath = dir
-		if err := cli.ExecuteContext(ctx); err != nil {
-			panic(err)
+		dir := dir
+		filename := filename
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			pname, err := getPackageName(filename)
+			if err != nil {
+				fmt.Println(err)
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				newCtx := context.WithValue(ctx, ConfigKey, Config{
+					packageName: pname,
+					ppath:       dir,
+				})
+				if err := cli.ExecuteContext(newCtx); err != nil {
+					fmt.Println(err)
+					return
+				}
+			}
+
+		}()
+		count += 1
+		if count == batchSize {
+			wg.Wait()
+			count = 0
 		}
 	}
 }
